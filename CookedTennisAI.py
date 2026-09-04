@@ -1,6 +1,41 @@
 import os
+import sys
+from pathlib import Path
 
-from AIGamePyLibrary import *
+# -----------------------------------------------------------------------------
+# Locate AIGamePyLibrary automatically.
+#
+# Supported layouts:
+#   parent/
+#     AIA-Tennis/
+#     AIGamePyLibrary/
+#
+# or:
+#   AIA-Tennis/
+#     AIGamePyLibrary/
+# -----------------------------------------------------------------------------
+ROOT = Path(__file__).resolve().parent
+LIBRARY_CANDIDATES = (
+    ROOT.parent / "AIGamePyLibrary",
+    ROOT / "AIGamePyLibrary",
+)
+
+for candidate in LIBRARY_CANDIDATES:
+    package_init = candidate / "AIGamePyLibrary" / "__init__.py"
+    if package_init.is_file():
+        sys.path.insert(0, str(candidate))
+        break
+
+try:
+    from AIGamePyLibrary import *
+except ModuleNotFoundError as exc:
+    if exc.name == "AIGamePyLibrary":
+        raise SystemExit(
+            "AIGamePyLibrary was not found.\n"
+            "Run build_deepcourt.bat on Windows, or clone\n"
+            "https://github.com/theaia/AIGamePyLibrary next to this repository."
+        ) from exc
+    raise
 
 # -----------------------------------------------------------------------------
 # DeepCourt: reactive tennis bot for AIA Tennis v0.11
@@ -44,8 +79,11 @@ time_to_destination = TennisGetFloat("Time To Destination")
 shot_topspin = TennisGetFloat("Shot: Topspin")
 shot_flat = TennisGetFloat("Shot: Flat")
 
+# Move the BODY so the logical racket center reaches the ball. Contact quality in
+# the game is graded from Self Racket Center, not simply the player transform.
 racket_offset = racket_pos - self_pos
 
+# Predicted Bounce is not trustworthy during a serve toss, so keep a safe fallback.
 safe_bounce = ConditionalSetVector3(
     IsNull(predicted_bounce),
     center_back,
@@ -55,15 +93,18 @@ safe_bounce = ConditionalSetVector3(
 body_for_bounce = safe_bounce - racket_offset
 body_for_live_ball = ball_pos - racket_offset
 
+# Pre-position at the bounce, then track the live ball once it becomes playable.
 incoming_target = ConditionalSetVector3(
     ball_playable,
     body_for_live_ball,
     body_for_bounce,
 )
 
+# Shade the stock receive position toward center to cover wide serves better.
 receive_ready = receive_stance * 0.60 + center_half * 0.40
 base_recovery = center_back * 0.72 + center_half * 0.28
 
+# Bias recovery toward the opponent's estimated target without overcommitting.
 safe_opp_estimate = ConditionalSetVector3(
     IsNull(estimated_opp_shot),
     base_recovery,
@@ -90,6 +131,7 @@ move_target = ConditionalSetVector3(
     setup_move,
 )
 
+# Sprint only when walking is unlikely to arrive in time or the target is far away.
 move_distance = Distance(self_pos, move_target)
 walk_cannot_make_it = (time_to_destination * 7.6) < move_distance
 very_far = move_distance > 5.0
@@ -105,12 +147,14 @@ stamina_ok = ConditionalSetBool(
 
 sprint = is_playing & ball_incoming & urgent & stamina_ok
 
+# Prefer a learned scoring location for depth; fall back to a legal random target.
 base_aim = ConditionalSetVector3(
     IsNull(self_scoring_location),
     random_aim,
     self_scoring_location,
 )
 
+# Aim wide, away from the opponent, while leaving margin inside the sideline.
 safe_wide = court_width * 0.415
 opp_right = opp_pos.z > 0.70
 opp_left = opp_pos.z < -0.70
@@ -129,6 +173,7 @@ away_z = ConditionalSetFloat(
 rally_aim_raw = Vector3(base_aim.x, base_aim.y, away_z)
 rally_aim = TennisAutoAim(rally_aim_raw)
 
+# Aggressive wide Flat first serve; conservative legal Topspin second serve.
 serve_side = Sign(legal_serve_target.z)
 aggressive_serve_z = serve_side * court_width * 0.38
 aggressive_serve = Vector3(
@@ -148,8 +193,11 @@ aim_target = ConditionalSetVector3(
     rally_aim,
 )
 
+# AutoSwitch allows independent movement and shot placement.
 move_and_aim = TennisAutoSwitch(move_target, aim_target)
 
+# Flat is the default attacking ball. Topspin gives more margin when stretched or
+# when handling a charged incoming shot.
 stretched = (move_distance > 5.5) | walk_cannot_make_it
 use_topspin_rally = stretched | ball_charged
 rally_shot = ConditionalSetFloat(
@@ -178,6 +226,7 @@ TennisController(
     sprint,
 )
 
+# Compile the static graph directly into the save directory used by AIA Tennis.
 save_path = GetTennisSavePath(BOT_NAME)
 os.makedirs(os.path.dirname(save_path), exist_ok=True)
 SaveData(save_path, "auto")
