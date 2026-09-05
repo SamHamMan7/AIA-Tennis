@@ -29,7 +29,9 @@ except ModuleNotFoundError as exc:
     raise
 
 # -----------------------------------------------------------------------------
-# DeepCourt v3 -- accurate contact, safer serving, less predictable placement.
+# DeepCourt v4 -- v0.13-aware tactical tennis bot.
+# Reliable racket-center contact remains the base. Drop, lob, and curve shots are
+# situational weapons rather than replacements for the consistent rally game.
 # -----------------------------------------------------------------------------
 
 BOT_NAME = "DeepCourt"
@@ -70,9 +72,14 @@ ball_charged = TennisGetBool("Ball Has Charged Effect")
 self_stamina = TennisGetFloat("Self Stamina Pct")
 court_width = TennisGetFloat("Court Width")
 time_to_destination = TennisGetFloat("Time To Destination")
+rally_fatigue = TennisGetFloat("Rally Fatigue")
 
 shot_topspin = TennisGetFloat("Shot: Topspin")
 shot_flat = TennisGetFloat("Shot: Flat")
+shot_drop = TennisGetFloat("Shot: Drop")
+shot_lob = TennisGetFloat("Shot: Lob")
+shot_curve_left = TennisGetFloat("Shot: Curve Left")
+shot_curve_right = TennisGetFloat("Shot: Curve Right")
 
 # -----------------------------------------------------------------------------
 # Contact geometry
@@ -88,6 +95,8 @@ safe_bounce = ConditionalSetVector3(
 body_for_bounce = safe_bounce - racket_offset
 body_for_live_ball = ball_pos - racket_offset
 
+# Prediction is more accurate in v0.12+, but live tracking after the bounce still
+# gives the best final sweet-spot alignment.
 lead_target = body_for_live_ball * 0.72 + body_for_bounce * 0.28
 playable_target = ConditionalSetVector3(
     ball_has_bounced,
@@ -101,7 +110,8 @@ incoming_target = ConditionalSetVector3(
     body_for_bounce,
 )
 
-# Rally contact quality is graded from horizontal ball-to-racket-center error.
+# Rally accuracy is determined by horizontal distance from the logical racket
+# center. Keep a buffer inside the Good-contact radius.
 contact_dx = ball_pos.x - racket_pos.x
 contact_dz = ball_pos.z - racket_pos.z
 contact_dist_sq = contact_dx * contact_dx + contact_dz * contact_dz
@@ -156,22 +166,18 @@ stamina_ok = ConditionalSetBool(
 sprint = is_playing & ball_incoming & urgent & stamina_ok
 
 # -----------------------------------------------------------------------------
-# Rally placement
+# Base rally placement
 # -----------------------------------------------------------------------------
-# Keep the accuracy-first depth logic from v2.
 base_aim = ConditionalSetVector3(
     IsNull(self_scoring_location),
     random_aim,
     self_scoring_location,
 )
 
+# Near-zero AutoAim resolves to a legal opponent-half center landing.
 center_aim = TennisAutoAim(Vector3(0.0, 0.0, 0.0))
 safe_base_aim = base_aim * 0.62 + center_aim * 0.38
 
-# v2 always aimed to the side opposite the opponent. It was effective but made
-# the same directional pattern over and over. v3 only does that when the opponent
-# is clearly pulled wide. When they are near the middle, Random Aim Target chooses
-# which safe side to attack, so the bot can go either direction.
 safe_wide = court_width * 0.28
 centered_z = safe_base_aim.z * 0.45
 
@@ -197,23 +203,110 @@ mixed_side_z = ConditionalSetFloat(
     safe_wide * -0.82,
 )
 
-rally_z = ConditionalSetFloat(
+normal_rally_z = ConditionalSetFloat(
     opp_wide,
     open_court_z,
     mixed_side_z,
 )
 
-rally_aim_raw = Vector3(safe_base_aim.x, safe_base_aim.y, rally_z)
-rally_aim = TennisAutoAim(rally_aim_raw)
+normal_rally_aim = TennisAutoAim(
+    Vector3(safe_base_aim.x, safe_base_aim.y, normal_rally_z)
+)
+
+# -----------------------------------------------------------------------------
+# Tactical trick shots -- v0.12 / v0.13
+# -----------------------------------------------------------------------------
+# With the court centered around the net, abs(opponent X) is a useful estimate of
+# how deep the opponent is. Only try tricks on clean contact while not scrambling.
+opp_depth = Abs(opp_pos.x)
+stretched = (move_distance > 4.8) | walk_cannot_make_it
+stable_for_trick = good_contact & ~stretched & ~ball_charged & (rally_fatigue < 0.55)
+
+opp_near_net = opp_depth < 4.1
+opp_very_deep = opp_depth > 8.2
+
+# Random Aim Target changes over play. Use its lateral magnitude as a lightweight
+# gate so drop/curve attempts are occasional instead of happening on every chance.
+trick_roll = Abs(random_aim.z) > (court_width * 0.20)
+
+lob_opportunity = stable_for_trick & opp_near_net
+drop_opportunity = stable_for_trick & opp_very_deep & trick_roll
+curve_opportunity = stable_for_trick & opp_wide & ~opp_near_net & ~opp_very_deep & trick_roll
+
+# In v0.12+ aim is the actual intended landing location. Give each trick its own
+# depth instead of trying to control depth with charge.
+# Lob: deep and mostly away from the sideline.
+lob_aim = TennisAutoAim(
+    Vector3(center_aim.x * 1.68, center_aim.y, normal_rally_z * 0.70)
+)
+
+# Drop: short, with enough lateral angle to make a deep defender run forward.
+drop_aim = TennisAutoAim(
+    Vector3(center_aim.x * 0.36, center_aim.y, normal_rally_z * 0.58)
+)
+
+# Curve: deep-ish but start nearer the middle so the stronger v0.12 curve can do
+# the sideways work without aiming dangerously close to a line.
+curve_aim = TennisAutoAim(
+    Vector3(center_aim.x * 1.35, center_aim.y, open_court_z * 0.30)
+)
+
+# Try both curve directions depending on which side the opponent occupies. This
+# can be reversed later if testing shows Unity's left/right convention is opposite
+# to the apparent world-space direction.
+curve_shot = ConditionalSetFloat(
+    opp_right,
+    shot_curve_left,
+    shot_curve_right,
+)
+
+# Priority: lob the net-rusher, drop-shot the deep camper, curve a wide opponent.
+clean_attack = good_contact & ~stretched & ~ball_charged
+normal_rally_shot = ConditionalSetFloat(
+    clean_attack,
+    shot_flat,
+    shot_topspin,
+)
+
+shot_after_curve = ConditionalSetFloat(
+    curve_opportunity,
+    curve_shot,
+    normal_rally_shot,
+)
+shot_after_drop = ConditionalSetFloat(
+    drop_opportunity,
+    shot_drop,
+    shot_after_curve,
+)
+rally_shot = ConditionalSetFloat(
+    lob_opportunity,
+    shot_lob,
+    shot_after_drop,
+)
+
+aim_after_curve = ConditionalSetVector3(
+    curve_opportunity,
+    curve_aim,
+    normal_rally_aim,
+)
+aim_after_drop = ConditionalSetVector3(
+    drop_opportunity,
+    drop_aim,
+    aim_after_curve,
+)
+rally_aim = ConditionalSetVector3(
+    lob_opportunity,
+    lob_aim,
+    aim_after_drop,
+)
 
 # -----------------------------------------------------------------------------
 # Serve placement
 # -----------------------------------------------------------------------------
-# The old first serve sat at 25% of total court width -- essentially right on the
-# service-box side edge. Pull it well inward. Second serve stays dead-center in
-# the legal service area.
+# v0.12+ clamps serve aim into the legal service area. Keep the first serve safely
+# inward anyway; the second serve uses the known center-of-valid-serve target.
 serve_side = Sign(legal_serve_target.z)
-safe_first_serve_z = serve_side * court_width * 0.16
+safe_first_serve_z = serve_side * court_width * 0.14
 safe_first_serve = Vector3(
     legal_serve_target.x,
     legal_serve_target.y,
@@ -235,17 +328,8 @@ aim_target = ConditionalSetVector3(
 move_and_aim = TennisAutoSwitch(move_target, aim_target)
 
 # -----------------------------------------------------------------------------
-# Shot type + swing timing
+# Swing timing
 # -----------------------------------------------------------------------------
-stretched = (move_distance > 4.8) | walk_cannot_make_it
-clean_attack = good_contact & ~stretched & ~ball_charged
-rally_shot = ConditionalSetFloat(
-    clean_attack,
-    shot_flat,
-    shot_topspin,
-)
-
-# Flat first serve, Topspin second serve.
 serve_shot = ConditionalSetFloat(
     is_second_serve,
     shot_topspin,
@@ -257,9 +341,8 @@ shot_type = ConditionalSetFloat(
     rally_shot,
 )
 
-# Keep charged rally swings, but use a separate Normal Only AutoSwing for serving.
-# That removes rally-charge behavior from the serve path and prioritizes a simple,
-# repeatable toss/contact sequence -- especially important on second serve.
+# PreferCharge lets the v0.12+ trick types carry their own charge/power behavior.
+# Serving stays on the simple Normal Only sequence for reliability.
 rally_auto_swing = TennisAutoSwing(rally_shot, "Prefer Charge")
 serve_auto_swing = TennisAutoSwing(serve_shot, "Normal Only")
 
