@@ -1,0 +1,53 @@
+name: Build prebuilt DeepCourt
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "CookedTennisAI.py"
+      - ".github/workflows/build-prebuilt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout AIA-Tennis
+        uses: actions/checkout@v4
+
+      - name: Checkout AIGamePyLibrary
+        uses: actions/checkout@v4
+        with:
+          repository: theaia/AIGamePyLibrary
+          path: AIGamePyLibrary
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build DeepCourt.txt
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$PWD\AIGamePyLibrary"
+          python .\CookedTennisAI.py
+          $src = Join-Path $env:USERPROFILE "AppData\LocalLow\Unicorn One\AIComp\Saves\Tennis\DeepCourt.txt"
+          if (-not (Test-Path $src)) { throw "DeepCourt.txt was not produced" }
+          Copy-Item $src .\DeepCourt.txt -Force
+
+      - name: Commit prebuilt graph
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add DeepCourt.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "DeepCourt.txt is already up to date."
+            exit 0
+          }
+          git commit -m "Update prebuilt DeepCourt graph"
+          git push
