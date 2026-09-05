@@ -29,7 +29,7 @@ except ModuleNotFoundError as exc:
     raise
 
 # -----------------------------------------------------------------------------
-# DeepCourt v2 -- accuracy-first reactive tennis bot for AIA Tennis v0.11.
+# DeepCourt v3 -- accurate contact, safer serving, less predictable placement.
 # -----------------------------------------------------------------------------
 
 BOT_NAME = "DeepCourt"
@@ -101,7 +101,7 @@ incoming_target = ConditionalSetVector3(
     body_for_bounce,
 )
 
-# Rally contact quality is graded from the horizontal ball-to-racket-center error.
+# Rally contact quality is graded from horizontal ball-to-racket-center error.
 contact_dx = ball_pos.x - racket_pos.x
 contact_dz = ball_pos.z - racket_pos.z
 contact_dist_sq = contact_dx * contact_dx + contact_dz * contact_dz
@@ -156,8 +156,9 @@ stamina_ok = ConditionalSetBool(
 sprint = is_playing & ball_incoming & urgent & stamina_ok
 
 # -----------------------------------------------------------------------------
-# Safer shot placement
+# Rally placement
 # -----------------------------------------------------------------------------
+# Keep the accuracy-first depth logic from v2.
 base_aim = ConditionalSetVector3(
     IsNull(self_scoring_location),
     random_aim,
@@ -167,36 +168,62 @@ base_aim = ConditionalSetVector3(
 center_aim = TennisAutoAim(Vector3(0.0, 0.0, 0.0))
 safe_base_aim = base_aim * 0.62 + center_aim * 0.38
 
+# v2 always aimed to the side opposite the opponent. It was effective but made
+# the same directional pattern over and over. v3 only does that when the opponent
+# is clearly pulled wide. When they are near the middle, Random Aim Target chooses
+# which safe side to attack, so the bot can go either direction.
 safe_wide = court_width * 0.28
 centered_z = safe_base_aim.z * 0.45
-opp_right = opp_pos.z > 0.90
-opp_left = opp_pos.z < -0.90
 
-wide_z_if_not_right = ConditionalSetFloat(
+opp_right = opp_pos.z > 1.35
+opp_left = opp_pos.z < -1.35
+opp_wide = opp_right | opp_left
+
+open_z_if_not_right = ConditionalSetFloat(
     opp_left,
     safe_wide,
     centered_z,
 )
-away_z = ConditionalSetFloat(
+open_court_z = ConditionalSetFloat(
     opp_right,
     safe_wide * -1.0,
-    wide_z_if_not_right,
+    open_z_if_not_right,
 )
 
-rally_aim_raw = Vector3(safe_base_aim.x, safe_base_aim.y, away_z)
+random_right = random_aim.z >= 0.0
+mixed_side_z = ConditionalSetFloat(
+    random_right,
+    safe_wide * 0.82,
+    safe_wide * -0.82,
+)
+
+rally_z = ConditionalSetFloat(
+    opp_wide,
+    open_court_z,
+    mixed_side_z,
+)
+
+rally_aim_raw = Vector3(safe_base_aim.x, safe_base_aim.y, rally_z)
 rally_aim = TennisAutoAim(rally_aim_raw)
 
+# -----------------------------------------------------------------------------
+# Serve placement
+# -----------------------------------------------------------------------------
+# The old first serve sat at 25% of total court width -- essentially right on the
+# service-box side edge. Pull it well inward. Second serve stays dead-center in
+# the legal service area.
 serve_side = Sign(legal_serve_target.z)
-aggressive_serve_z = serve_side * court_width * 0.25
-aggressive_serve = Vector3(
+safe_first_serve_z = serve_side * court_width * 0.16
+safe_first_serve = Vector3(
     legal_serve_target.x,
     legal_serve_target.y,
-    aggressive_serve_z,
+    safe_first_serve_z,
 )
+
 serve_aim = ConditionalSetVector3(
     is_second_serve,
     legal_serve_target,
-    aggressive_serve,
+    safe_first_serve,
 )
 
 aim_target = ConditionalSetVector3(
@@ -218,6 +245,7 @@ rally_shot = ConditionalSetFloat(
     shot_topspin,
 )
 
+# Flat first serve, Topspin second serve.
 serve_shot = ConditionalSetFloat(
     is_second_serve,
     shot_topspin,
@@ -229,21 +257,23 @@ shot_type = ConditionalSetFloat(
     rally_shot,
 )
 
-auto_swing = TennisAutoSwing(shot_type, "Prefer Charge")
+# Keep charged rally swings, but use a separate Normal Only AutoSwing for serving.
+# That removes rally-charge behavior from the serve path and prioritizes a simple,
+# repeatable toss/contact sequence -- especially important on second serve.
+rally_auto_swing = TennisAutoSwing(rally_shot, "Prefer Charge")
+serve_auto_swing = TennisAutoSwing(serve_shot, "Normal Only")
 
-# If AutoSwing wants to release while the racket is still outside the buffered
-# Good-contact ring, keep charge held for a moment so footwork can finish lining
-# up. Serve timing is left entirely to AutoSwing.
 hold_for_alignment = (
     is_playing
     & ball_playable
     & ball_in_swing_range
     & ~good_contact
 )
-rally_swing = auto_swing.swing | hold_for_alignment
+rally_swing = rally_auto_swing.swing | hold_for_alignment
+
 swing_control = ConditionalSetBool(
     is_self_serving,
-    auto_swing.swing,
+    serve_auto_swing.swing,
     rally_swing,
 )
 
