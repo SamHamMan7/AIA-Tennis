@@ -1,0 +1,38 @@
+name: Build portable launcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "launcher/AIA-Tennis.cs"
+      - ".github/workflows/build-launcher.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile launcher
+        shell: pwsh
+        run: |
+          $framework = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $framework)) {
+            $framework = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          }
+          if (-not (Test-Path $framework)) { throw "C# compiler not found" }
+          New-Item -ItemType Directory -Force -Path dist\Bots | Out-Null
+          & $framework /nologo /target:winexe /optimize+ /reference:System.Windows.Forms.dll /out:dist\AIA-Tennis.exe launcher\AIA-Tennis.cs
+          if ($LASTEXITCODE -ne 0) { throw "Launcher compilation failed" }
+          Set-Content -Path dist\Bots\PUT-BOTS-HERE.txt -Value "Put DeepCourt.txt and other Tennis bot .txt files in this folder. Then launch AIA-Tennis.exe beside Aialanders.exe."
+
+      - name: Upload portable launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIA-Tennis-Portable
+          path: dist/
